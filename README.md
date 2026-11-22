@@ -1,20 +1,10 @@
 # DouEnMH
 
-斗地主 AI：PyTorch 训练，TorchScript 导出，C++ + LibTorch 1.5.0 在 [Botzone](https://botzone.org.cn) 实时对战。
-
-## 卖点
-
-**这不是又一个 DouZero 复刻。** 在 DMC 分布式 actor-learner 框架上挂了 6 个监督头：除了经典的
-胜率 / 胜时价值 / 负时价值三头，还多出三个"神谕头"——用完全信息下"这手牌最少还要几步打完"的 DP
-结果做辅助监督，训练前期强推、后期退火，让价值网络先学会牌理再自己下棋。
-
-**把牌型和对手都摊开给 Transformer 看。** 8×15 = 120 维卡牌矩阵显式标出断点、单顺/连对/飞机起点，
-替代 DouZero 的 54 维编码；外加 22 维对手建模——手牌强度、炸弹概率、七类牌型的出牌偏好、压制意愿与
-节奏——模型不只看自己手里有什么，也看对手想干什么。
-
-**训练与部署两端逐位对齐。** 训练端 PyTorch 2.x，部署端只给 LibTorch 1.5.0：仓库自带 PyTorch 1.5
-兼容模型层、TorchScript 导出与 FP16 精度对比，改一处特征两端都要同步。另附一个内嵌裁判的本地对局
-runner，不连平台也能把完整对局跑起来、按胜率验证改动。
+DouEnMH：PyTorch 训练，TorchScript 导出，C++ + LibTorch 1.5.0 在 [Botzone](https://botzone.org.cn) 实时对战。
+这是一个基于Transformer的斗地主AI，在 DMC 分布式 actor-learner 框架上挂了 6 个监督头：除了经典的胜率 / 胜时价值 / 负时价值三头，还多出三个"神谕头"——用完全信息下"这手牌最少还要几步打完"的 DP结果做辅助监督，训练前期强推、后期退火，让价值网络先学会牌理再自己下棋。
+本项目采用 8×15 = 120 维卡牌矩阵对游戏进行建模，显式标出卡牌断点、单顺/连对/飞机起点，替代 DouZero 的 54 维编码；外加 22 维对手建模——手牌强度、炸弹概率、七类牌型的出牌偏好、压制意愿与节奏——模型不只看自己手里有什么，也看对手想干什么。
+本项目在Python训练端使用 PyTorch 2.x，CPP部署端为兼容Botzone使用 LibTorch 1.5.0：仓库自带 PyTorch 1.5 兼容模型层、TorchScript 导出与 FP16 精度对比，改一处特征两端都要同步。另附一个内嵌裁判的本地对局runner，不连平台也能把完整对局跑起来、按胜率验证改动。
+本项目基于Douzero与 https://github.com/DouMH-Official/DouMH 中的代码进行开发，大量借用了DouMH项目中的思想与代码。
 
 ## 项目结构
 
@@ -129,6 +119,10 @@ bash cpp/scripts/amalgamate.sh               # 或合成单文件（需 Amalgama
 | [docs/model-export.md](docs/model-export.md) | PyTorch → TorchScript → LibTorch、FP16 精度验证 |
 | [docs/runner.md](docs/runner.md) | 本地对局 runner：模式、参数、日志与统计 |
 | [models/README.md](models/README.md) | 权重获取与放置 |
+
+## 参考文献
+
+S. Han, Z. Jin, Q. Liu, and C. Xu, "DouMH: Improving DouZero with multiple heads," in Proc. 2024 7th Int. Conf. Computer Information Science and Artificial Intelligence (CISAI), Shaoxing, China, Sep. 2024, pp. 297-302, doi: 10.1145/3703187.3703237.
 
 ## 许可
 
