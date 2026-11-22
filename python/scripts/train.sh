@@ -1,76 +1,81 @@
 #!/bin/bash
 # ============================================================
-# DouMH 训练脚本 (GPU 优化版)
+# DouEnMH 训练脚本 —— 开发/冒烟配置
 #
-# 核心优化:
-#   1. Actor NN 推理移至 GPU (去除 actor_device_cpu)
-#      - CPU 专注游戏逻辑 + 蒙特卡洛采样
-#      - GPU 4090D 处理 Actor 推理 + Learner 训练，时分复用
-#   2. 模型架构可配置 (d_model / nhead / layers / dim_ff)
-#   3. 模型架构可配置，默认预留 ~6GB 显存余量防止 OOM
+# 相对 python/scripts/train_full.sh 的差异:
+#   小模型（d_model=16 / 4 层 / 4 头）、小批量、2 个 actor、2000 帧，
+#   用于跑通流程与验证代码改动, 不用于产出正式权重。
 #
-# 用法:
-#   bash train.sh                                    # 默认参数
-#   bash train.sh --total_frames 50000000            # 自定义训练帧数
-#   bash train.sh --load_model                       # 从 checkpoint 恢复
-#   D_MODEL=256 NHEAD=8 bash train.sh                # 轻量模型 (快速测试)
-#   ACTOR_MODE=cpu bash train.sh                     # 回退: CPU Actor
+# 用法（可在任意目录执行, 脚本会自行定位仓库根并切到 python/）:
+#   bash python/scripts/train.sh                              # 默认参数
+#   bash python/scripts/train.sh --total_frames 50000000      # 追加/覆盖参数
+#   bash python/scripts/train.sh --load_model                 # 从 checkpoint 续训
+#   D_MODEL=256 NHEAD=8 bash python/scripts/train.sh          # 环境变量覆盖模型宽度
+#   ACTOR_MODE=cpu bash python/scripts/train.sh               # Actor 推理回退到 CPU
+#
+# 依赖: PATH 中的 python（或显式设置 PYTHON 指向解释器）与可用的 CUDA。
 # ============================================================
 set -e
 
-# ---------- 环境激活 ----------
-PYTHON="f:/python/Python312/python.exe"
-export TMP="h:/tmp2"
-export TEMP="h:/tmp2"
-# PyTorch CUDA allocator: eliminate fragmentation at source
-# roundup_power2_divisions:16  — round all allocs to 16 power-of-2 buckets
-# max_split_size_mb:128        — don't cache blocks >128MB
-# expandable_segments          — Linux only, further defrag (PyTorch ≥ 2.0)
+# ---------- 定位仓库根, 并切到 python/ ----------
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$REPO_ROOT/python"
+
+# ---------- 解释器与可选临时目录 ----------
+PYTHON="${PYTHON:-python}"
+# 可选: 调用方已设置 TMP 时同步导出 TEMP（Windows 上两者通常成对）;
+# 未设置时不导出, 沿用系统默认临时目录。
+if [ -n "${TMP:-}" ]; then
+    export TMP
+    export TEMP="$TMP"
+fi
+
+# PyTorch CUDA allocator: 从分配源头抑制显存碎片
+# roundup_power2_divisions:16 — 分配尺寸向上取整到 16 个 2 的幂档位
+# max_split_size_mb:128       — 不缓存大于 128MB 的块
+# expandable_segments         — 仅 Linux（PyTorch ≥ 2.0）进一步减碎片
 if [ "$OS" != "Windows_NT" ]; then
     export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:128,roundup_power2_divisions:16"
 else
     export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:128,roundup_power2_divisions:16"
 fi
 
-# CUDA_LAUNCH_BLOCKING=1 使所有 CUDA 启动同步执行，错误可立即抛出而非静默挂起
-# (已禁用 — 同步执行导致严重性能下降，尤其与 LOR 额外输出头叠加时)
+# CUDA_LAUNCH_BLOCKING=1 会让所有 CUDA 启动同步执行, 便于定位错误,
+# 但严重拖慢训练（尤其叠加 LOR 额外输出头时）, 默认关闭。
 # export CUDA_LAUNCH_BLOCKING=1
 
-# ---------- 验证环境 ----------
+# ---------- 环境自检 ----------
 $PYTHON -c "import torch; assert torch.cuda.is_available(), 'CUDA 不可用!'; print(f'[OK] PyTorch {torch.__version__}, GPU: {torch.cuda.get_device_name(0)}')"
 
-# ---------- 工作目录 ----------
-cd "h:/bot/DouEnMH-design/DouEnMH/DouEnMH-new"
-
 # ============================================================
-# 可配置参数 (通过环境变量覆盖)
+# 可配置参数（通过环境变量覆盖）
 # ============================================================
 
 # --- 训练规模 ---
-XPID="${XPID:-douEnMH_v1.0}"                  # 实验名称
-TOTAL_FRAMES="${TOTAL_FRAMES:-2000}" # 总训练帧数 (3亿)
-NUM_ACTORS="${NUM_ACTORS:-2}"             # Actor 进程数
-SAVE_INTERVAL="${SAVE_INTERVAL:-10}"      # checkpoint 保存间隔 (分钟)
-BATCH_SIZE="${BATCH_SIZE:-2}"            # Learner 批次大小 (越大显存越多)
-UNROLL_LENGTH="${UNROLL_LENGTH:-5}"       # 轨迹展开长度 (越大显存越多)
-LEARNING_RATE="${LEARNING_RATE:-0.0003}"  # 学习率
-GRAD_ACCUM="${GRAD_ACCUM:-1}"             # 梯度累积步数 (1=不累积)
-EXP_EPSILON="${EXP_EPSILON:-0.3}"         # Epsilon 探索率 (叫分阶段需要高探索)
-BID_EXP_EPSILON="${BID_EXP_EPSILON:-0.3}"   # 叫分独立探索率
+XPID="${XPID:-douEnMH_v1.0}"                  # 实验名称（决定 douzero_checkpoints/<XPID>/）
+TOTAL_FRAMES="${TOTAL_FRAMES:-2000}"          # 总训练帧数
+NUM_ACTORS="${NUM_ACTORS:-2}"                 # 每个 actor 设备上的 actor 进程数
+SAVE_INTERVAL="${SAVE_INTERVAL:-10}"          # checkpoint 保存间隔（分钟）
+BATCH_SIZE="${BATCH_SIZE:-2}"                 # Learner 出牌批次大小（越大显存越多）
+UNROLL_LENGTH="${UNROLL_LENGTH:-5}"           # 轨迹展开长度（越大显存越多）
+LEARNING_RATE="${LEARNING_RATE:-0.0003}"      # 学习率
+GRAD_ACCUM="${GRAD_ACCUM:-1}"                 # 梯度累积步数（1=不累积）
+EXP_EPSILON="${EXP_EPSILON:-0.3}"             # 出牌探索率终值（叫分阶段也需要高探索）
+BID_EXP_EPSILON="${BID_EXP_EPSILON:-0.3}"     # 叫分独立探索率终值
 
 # --- 叫分课程 ---
-BID_CURRICULUM_GAMES="${BID_CURRICULUM_GAMES:-5000}"  # P0叫0分衰减局数 (0=关闭)
+BID_CURRICULUM_GAMES="${BID_CURRICULUM_GAMES:-5000}"  # P0 叫 0 分的偏置衰减局数（0=关闭）
 
 # --- 日志控制 ---
-LOG_GAME_STEPS="${LOG_GAME_STEPS:-0}"        # 0=关闭每局步数日志, 1=开启 (多actor时刷屏严重)
+LOG_GAME_STEPS="${LOG_GAME_STEPS:-0}"         # 0=关闭每局步数日志, 1=开启（多 actor 时刷屏）
 
-# --- 模型架构 (安全余量, 预计 ~18GB 显存) ---
-D_MODEL="${D_MODEL:-16}"                 # Transformer 嵌入维度
-NHEAD="${NHEAD:-4}"                       # 多头注意力头数
-NUM_ENCODER_LAYERS="${NUM_ENCODER_LAYERS:-4}"  # Encoder 层数
-DIM_FEEDFORWARD="${DIM_FEEDFORWARD:-256}"     # FFN 隐藏.3层维度
+# --- 模型架构（小模型，便于快速跑通） ---
+D_MODEL="${D_MODEL:-16}"                      # Transformer 嵌入维度
+NHEAD="${NHEAD:-4}"                           # 多头注意力头数
+NUM_ENCODER_LAYERS="${NUM_ENCODER_LAYERS:-4}" # Encoder 层数
+DIM_FEEDFORWARD="${DIM_FEEDFORWARD:-256}"     # FFN 隐藏层维度
 
-# --- Actor 模式: gpu (推荐) / cpu (回退) ---
+# --- Actor 模式: gpu（推荐）/ cpu（回退） ---
 ACTOR_MODE="${ACTOR_MODE:-gpu}"
 
 
@@ -78,7 +83,7 @@ ACTOR_MODE="${ACTOR_MODE:-gpu}"
 # 打印配置
 # ============================================================
 echo "============================================"
-echo " DouMH 训练 (GPU 优化版)"
+echo " DouEnMH 训练（开发/冒烟配置）"
 echo "============================================"
 echo " 实验名称:       $XPID"
 echo " 总帧数:         $TOTAL_FRAMES"
@@ -89,7 +94,7 @@ echo " 批次大小:       $BATCH_SIZE x $UNROLL_LENGTH"
 echo " 学习率:         $LEARNING_RATE"
 echo " 梯度累积:       $GRAD_ACCUM"
 echo " 保存间隔:       ${SAVE_INTERVAL}min"
-echo " 输出目录:       checkpoints/$XPID/"
+echo " 输出目录:       douzero_checkpoints/$XPID/"
 echo "============================================"
 
 # ---------- 构建参数列表 ----------
@@ -129,4 +134,4 @@ echo ""
 $PYTHON train.py "${ARGS[@]}" "$@"
 
 echo ""
-echo "训练完成。模型保存在 checkpoints/$XPID/"
+echo "训练完成。模型保存在 douzero_checkpoints/$XPID/"

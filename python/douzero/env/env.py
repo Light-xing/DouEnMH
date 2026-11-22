@@ -249,7 +249,7 @@ class DummyAgent(object):
 def get_obs(infoset, bid_over, history_array=None):
     """观测构造入口 — 根据叫分/出牌阶段分派到对应的观测编码函数.
 
-    history_array: 增量缓存的历史编码 (30×120), 避免每步重算.
+    history_array: 增量缓存的历史编码 ((35,120)), 避免每步重算.
                    仅在出牌阶段使用; 叫分阶段忽略.
     """
     if infoset.player_position not in ["first", 'second', 'third', 'landlord', 'landlord_down', 'landlord_up']:

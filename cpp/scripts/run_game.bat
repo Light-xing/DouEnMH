@@ -1,22 +1,22 @@
 @echo off
 REM =============================================================================
-REM DouMH Botzone — Run Game Script
+REM run_game.bat — 用仓库内 runner 跑本地对局
 REM =============================================================================
-REM Judge:  ..\..\..\judge\judge_botzone_ver.py
-REM Bot:    ..\build\bot.exe
-REM Runner: ..\tools\runner.py
-REM Logs:   ..\build\game_state.log  ..\build\json_io.log  ..\build\bot_stderr.log
-REM =============================================================================
-REM Usage:
-REM   run_game.bat                  Run 1 game (with logging, verbose)
-REM   run_game.bat 50               Run 50 games (batch mode, no per-turn logs)
-REM   run_game.bat --quiet          Run 1 game without verbose bot I/O
-REM   run_game.bat 100 --quiet      Run 100 games quietly
+REM Runner: <repo>\tools\runner\runner.py  （内嵌裁判 + 子进程 bot）
+REM Bot:    cpp\build\bot.exe
+REM 日志:   cpp\build\bot_stderr_p*.log 等（runner 以 bot.exe 所在目录为工作目录）
+REM
+REM 用法:
+REM   run_game.bat                 跑 1 局（verbose，带逐步日志）
+REM   run_game.bat 50              跑 50 局（批量模式）
+REM   run_game.bat --quiet         跑 1 局，不打印逐步 I/O
+REM   run_game.bat 100 --quiet     跑 100 局，安静模式
 REM =============================================================================
 
 setlocal enabledelayedexpansion
 
 set "SCRIPT_DIR=%~dp0"
+set "REPO_ROOT=%SCRIPT_DIR%..\.."
 set "PYTHON=python"
 
 REM Defaults
@@ -29,8 +29,18 @@ for %%a in (%*) do (
     if "%%a"=="--quiet" set "VERBOSE="
 )
 
-set "RUNNER=%SCRIPT_DIR%..\..\..\botzone\runner.py"
+set "RUNNER=%REPO_ROOT%\tools\runner\runner.py"
 set "BOT=%SCRIPT_DIR%..\build\bot.exe"
+
+if not exist "%RUNNER%" (
+    echo [ERROR] runner not found: %RUNNER%
+    exit /b 1
+)
+if not exist "%BOT%" (
+    echo [ERROR] bot not found: %BOT%
+    echo   Build it first with build_local.bat, or run build.bat.
+    exit /b 1
+)
 
 if %GAMES% gtr 1 (
     REM Batch mode: no verbose, no per-turn logs by default

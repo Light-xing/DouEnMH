@@ -2,12 +2,16 @@
 FP16 模型精度验证脚本 (DouEnMH).
 
 对比 FP32 与 FP16 导出模型的推理输出，验证量化精度损失在可接受范围内。
+需要在 Python 3.8 + PyTorch 1.5.0 的桥接环境中运行（下文记作 <BRIDGE_PYTHON>），
+因为导出的 .pt 就是给 LibTorch 1.5.0 用的。
 
-用法:
-    h:/bot/environments/bridge_python/python38_full/python.exe \
-      h:/bot/DouEnMH-design/bridge/verify_fp16.py \
-      --model-dir h:/bot/DouEnMH-design/bridge/export_model \
-      --suffix 4572800
+用法（在仓库根目录执行）:
+    <BRIDGE_PYTHON> tools/export/verify_fp16.py \
+        --model-dir tools/export/export_model \
+        --suffix 620000000
+
+    # 省略 --suffix 时自动选择 export_model/ 下编号最大的子目录
+    <BRIDGE_PYTHON> tools/export/verify_fp16.py --model-dir tools/export/export_model
 """
 import os
 import sys
@@ -15,8 +19,10 @@ import argparse
 import torch
 import numpy as np
 
-MODEL_DIR = r'h:\bot\DouEnMH-design\bridge\export_model'
-SUFFIX = '4572800'
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.path.join(SCRIPT_DIR, 'export_model')
+# None = 自动探测 MODEL_DIR 下编号最大的后缀子目录
+SUFFIX = None
 BID_POSITIONS = ['first', 'second', 'third']
 PLAY_POSITIONS = ['landlord', 'landlord_up', 'landlord_down']
 
@@ -30,6 +36,18 @@ PLAY_Z_FEAT = 120
 # Acceptable precision thresholds
 MAX_ABS_ERROR_THRESHOLD = 1e-3     # FP16 vs FP32 max absolute error
 ARGMAX_AGREEMENT_MIN = 0.99        # argmax agreement minimum ratio (99%)
+
+
+def _find_latest_suffix(model_dir):
+    """返回 model_dir 下编号最大的后缀子目录名，找不到返回 None。"""
+    best = None
+    for name in os.listdir(model_dir):
+        if not os.path.isdir(os.path.join(model_dir, name)):
+            continue
+        if name.isdigit():
+            if best is None or int(name) > int(best):
+                best = name
+    return best
 
 
 def _get_x_dim_from_model(fp32_path):
@@ -48,7 +66,7 @@ def _get_x_dim_from_model(fp32_path):
         return 52
 
 
-def verify_bid_model(model_dir, name, suffix):
+def verify_bid_model(model_dir, name):
     """Verify bid model FP16 vs FP32."""
     fp32_path = os.path.join(model_dir, f'{name}_jit.pt')
     fp16_path = os.path.join(model_dir, f'{name}_jit_fp16.pt')
@@ -64,7 +82,9 @@ def verify_bid_model(model_dir, name, suffix):
     try:
         model_fp32 = torch.jit.load(fp32_path)
         model_fp32.eval()
-        model_fp16 = torch.jit.load(fp16_path)
+        # LibTorch 1.5.0 CPU 没有 FP16 算子，C++ 端加载后也是转 FP32 推理；
+        # 这里同样把权重转 FP32 再喂 FP32 输入，与部署路径一致。
+        model_fp16 = torch.jit.load(fp16_path).float()
         model_fp16.eval()
     except Exception as e:
         return {'name': name, 'status': f'ERROR loading model: {e}'}
@@ -78,7 +98,7 @@ def verify_bid_model(model_dir, name, suffix):
 
         with torch.no_grad():
             out_fp32 = model_fp32(z, x)
-            out_fp16 = model_fp16(z.half(), x.half()).float()
+            out_fp16 = model_fp16(z, x)
 
         max_abs = (out_fp32 - out_fp16).abs().max().item()
         max_abs_errs.append(max_abs)
@@ -105,7 +125,7 @@ def verify_bid_model(model_dir, name, suffix):
     }
 
 
-def verify_play_model(model_dir, name, suffix):
+def verify_play_model(model_dir, name):
     """Verify play model FP16 vs FP32."""
     fp32_path = os.path.join(model_dir, f'{name}_jit.pt')
     fp16_path = os.path.join(model_dir, f'{name}_jit_fp16.pt')
@@ -121,7 +141,9 @@ def verify_play_model(model_dir, name, suffix):
     try:
         model_fp32 = torch.jit.load(fp32_path)
         model_fp32.eval()
-        model_fp16 = torch.jit.load(fp16_path)
+        # LibTorch 1.5.0 CPU 没有 FP16 算子，C++ 端加载后也是转 FP32 推理；
+        # 这里同样把权重转 FP32 再喂 FP32 输入，与部署路径一致。
+        model_fp16 = torch.jit.load(fp16_path).float()
         model_fp16.eval()
     except Exception as e:
         return {'name': name, 'status': f'ERROR loading model: {e}'}
@@ -137,7 +159,7 @@ def verify_play_model(model_dir, name, suffix):
 
         with torch.no_grad():
             out_fp32 = model_fp32(src1, src2)
-            out_fp16 = model_fp16(src1.half(), src2.half()).float()
+            out_fp16 = model_fp16(src1, src2)
 
         max_abs = (out_fp32 - out_fp16).abs().max().item()
         max_abs_errs.append(max_abs)
@@ -166,11 +188,26 @@ def verify_play_model(model_dir, name, suffix):
 
 def main():
     parser = argparse.ArgumentParser(description='DouEnMH FP16 vs FP32 precision verification')
-    parser.add_argument('--model-dir', default=MODEL_DIR)
-    parser.add_argument('--suffix', default=SUFFIX)
+    parser.add_argument('--model-dir', default=MODEL_DIR,
+                        help=f'导出根目录 (默认: {MODEL_DIR})')
+    parser.add_argument('--suffix', default=SUFFIX,
+                        help='导出后缀子目录名 (默认: 自动选择编号最大的子目录)')
     args = parser.parse_args()
 
-    print(f'Model directory: {args.model_dir}/{args.suffix}')
+    suffix = args.suffix
+    if suffix is None:
+        if not os.path.isdir(args.model_dir):
+            print(f'ERROR: model directory not found: {args.model_dir}')
+            sys.exit(1)
+        suffix = _find_latest_suffix(args.model_dir)
+        if suffix is None:
+            print(f'ERROR: no numeric suffix subdirectory under {args.model_dir}')
+            print('请先运行 export_douenmh.py, 或用 --suffix 指定')
+            sys.exit(1)
+    model_dir = os.path.join(args.model_dir, str(suffix))
+
+    print(f'Model directory: {model_dir}')
+    print('FP16 模型加载后转 FP32 推理 (与 C++ 端 LibTorch 1.5.0 CPU 路径一致)')
     print(f'Thresholds: max_abs_err < {MAX_ABS_ERROR_THRESHOLD}, '
           f'argmax_agree >= {ARGMAX_AGREEMENT_MIN*100:.0f}%')
     print()
@@ -182,7 +219,7 @@ def main():
     print(f'  Bid Models')
     print(f'{"="*70}')
     for name in BID_POSITIONS:
-        r = verify_bid_model(args.model_dir, name, args.suffix)
+        r = verify_bid_model(model_dir, name)
         results.append(r)
         if 'SKIP' in r['status']:
             print(f'  {name:12s}  {r["status"]}')
@@ -200,7 +237,7 @@ def main():
     print(f'  Play Models')
     print(f'{"="*70}')
     for name in PLAY_POSITIONS:
-        r = verify_play_model(args.model_dir, name, args.suffix)
+        r = verify_play_model(model_dir, name)
         results.append(r)
         if 'SKIP' in r['status']:
             print(f'  {name:20s}  {r["status"]}')

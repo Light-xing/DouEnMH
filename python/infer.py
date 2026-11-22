@@ -5,7 +5,7 @@
     python infer.py --position landlord --model checkpoints/landlord.ckpt --hand "3,3,5,6,7,7,7,9,10,10,11,12,13,14,17,20,30" --history "[]"
 
     # 叫牌推理
-    python infer.py --position first --model checkpoints/first.ckpt --hand "3,4,5,6,7,8,9,10,11,12,13,14,17,20,30" --bid-info "0,0"
+    python infer.py --position first --model checkpoints/first.ckpt --hand "3,4,5,6,7,8,9,10,11,12,13,14,17,20,30" --bid-info "0,0,0"
 """
 import argparse
 import numpy as np

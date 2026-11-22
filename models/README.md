@@ -11,12 +11,12 @@
 
 ```
 python/douzero_checkpoints/DouEnMH_v1.2/
-├── first_620000000.ckpt          # 叫分位 0
-├── second_620000000.ckpt         # 叫分位 1
-├── third_620000000.ckpt          # 叫分位 2
-├── landlord_620000000.ckpt       # 地主出牌
-├── landlord_up_620000000.ckpt    # 农民上家
-└── landlord_down_620000000.ckpt  # 农民下家
+├── first_611140100.ckpt          # 叫分位 0
+├── second_611140100.ckpt         # 叫分位 1
+├── third_611140100.ckpt          # 叫分位 2
+├── landlord_611140100.ckpt       # 地主出牌
+├── landlord_up_611140100.ckpt    # 农民上家
+└── landlord_down_611140100.ckpt  # 农民下家
 ```
 
 ## 二、导出 TorchScript（`.pt`）
@@ -26,13 +26,13 @@ cd tools/export
 python export_douenmh.py \
     --checkpoint-dir ../../python/douzero_checkpoints/DouEnMH_v1.2 \
     --output-dir     export_model
-# 或指定步数后缀：--suffix 620000000
+# 或指定步数后缀：--suffix 611140100
 ```
 
 导出结果（每个后缀一个子目录）：
 
 ```
-tools/export/export_model/620000000/
+tools/export/export_model/611140100/
 ├── first_jit.pt   second_jit.pt  third_jit.pt
 ├── landlord_jit.pt  landlord_up_jit.pt  landlord_down_jit.pt
 ```
@@ -47,7 +47,7 @@ tools/export/export_model/620000000/
 
 ```bash
 cd tools/export
-cp export_model/620000000/*.pt ../../cpp/build/data/models/
+cp export_model/611140100/*.pt ../../cpp/build/data/models/
 ```
 
 Botzone 提交时，模型上传到平台的 User Storage，对应路径同样是 `data/models/`。

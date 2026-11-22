@@ -22,7 +22,7 @@
 //  10. 合并 hash+hmask 计算, 单次遍历
 //  11. 单 combo 快速路径: combo_sz == remaining → 直接返回
 //
-// MEMO_BITS=18 → 262144 槽位 (~4MB), 满足 Botzone 256MB 约束
+// MEMO_BITS=20 → 1048576 槽位 (~16MB), 与 Python C 扩展一致, 满足 Botzone 256MB 约束
 // =============================================================================
 
 #include "oracle.h"
@@ -629,11 +629,15 @@ static std::pair<short, short> dp_unified_impl(
         });
 
     // 优化 #9: 构建 first_ci_for_rem 查找表
+    // first_ci_for_rem[r] = 第一个 size <= r 的 combo 下标。
+    // metas 按 size 降序，因此必须让 r 也按降序扫描、ci 单调递增
+    // （与 Python oracle.py::_precompute_combo_data 一致）；若 r 升序，
+    // ci 在 r=0 时已推到 n，表项全为 n，DP 的 combo 循环将一次都不执行。
     std::array<short, 21> first_ci_for_rem;
     first_ci_for_rem.fill((short)metas.size());
     {
         size_t ci = 0;
-        for (short r = 0; r <= 20; r++) {
+        for (short r = 20; r >= 0; r--) {
             while (ci < metas.size() && metas[ci].size > r)
                 ci++;
             first_ci_for_rem[r] = (short)ci;

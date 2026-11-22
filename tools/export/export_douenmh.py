@@ -1,22 +1,24 @@
 """
 DouEnMH 模型导出为 TorchScript (.pt) 供 Botzone LibTorch 1.5.0 加载。
 
+必须在 Python 3.8 + PyTorch 1.5.0 的桥接环境中运行（下文记作 <BRIDGE_PYTHON>）：
+用训练端的 PyTorch 2.x 导出的 TorchScript 无法被 LibTorch 1.5.0 加载。
+详见 docs/model-export.md。
+
 特性:
-  - 自动从 checkpoint 检测架构参数 (d_model/nhead/layers/dim_ff/x_dim)
-  - Bid:  z=(B, 2, 120), x=(B, 3) → 3 头输出
-  - Play: src1=(B, 41, 120), src2=(B, X_dim) → 6 头输出  [V1 双塔]
-  - 支持 FP32 (torch.jit.trace) 和 FP16 (torch.jit.script)
+  - 自动从 V1 出牌模型 checkpoint 检测架构参数 (d_model/layers/dim_ff/x_dim)
+  - Bid:  z=(B, 2, 120), x=(B, 3) → 3 头 → Q 值
+  - Play: src1=(B, 41, 120), src2=(B, X_dim) → 6 头 → Q 值  [V1 双塔]
+  - FP32 用 torch.jit.trace 导出，FP16 用 torch.jit.script 导出
 
-用法 (在 bridge_python 的 PyTorch 1.5.0+ 环境中运行):
-    h:/bot/environments/bridge_python/python38_full/python.exe \
-      h:/bot/DouEnMH-design/bridge/export_douenmh.py \
-      --checkpoint-dir h:/bot/DouEnMH-design/DouEnMH/DouEnMH-new/douzero_checkpoints/DouEnMH_v1.2 \
-      --output-dir h:/bot/DouEnMH-design/bridge/export_model \
-      --suffix 4093600
+用法（在仓库根目录执行）:
+    <BRIDGE_PYTHON> tools/export/export_douenmh.py \
+        --checkpoint-dir python/douzero_checkpoints/DouEnMH_v1.2 \
+        --output-dir tools/export/export_model \
+        --suffix 620000000
 
-    # Auto-detect latest suffix:
-    h:/bot/environments/bridge_python/python38_full/python.exe \
-      h:/bot/DouEnMH-design/bridge/export_douenmh.py
+    # 省略 --suffix 时自动选择 checkpoint 目录中最大的步数:
+    <BRIDGE_PYTHON> tools/export/export_douenmh.py
 """
 import os
 import sys
@@ -31,10 +33,12 @@ from compat_models_douenmh import (
     BID_POSITIONS, PLAY_POSITIONS,
 )
 
-# 默认路径 (可通过 CLI 覆盖)
-CHECKPOINT_DIR = r'h:\bot\DouEnMH-design\DouEnMH\DouEnMH-new\douzero_checkpoints\DouEnMH_v1.2'
-OUTPUT_DIR = r'h:\bot\DouEnMH-design\bridge\export_model'
-SUFFIX = '4093600'
+# 默认路径（相对本脚本所在目录，可由 CLI 覆盖）
+CHECKPOINT_DIR = os.path.normpath(os.path.join(
+    SCRIPT_DIR, '..', '..', 'python', 'douzero_checkpoints', 'DouEnMH_v1.2'))
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, 'export_model')
+# None = 自动探测 checkpoint 目录中最大的训练步数
+SUFFIX = None
 
 # Fixed dimensions (encoding level, not model architecture)
 Z_DIM = 120           # cards2array_v2 维度
@@ -110,13 +114,16 @@ def export_bid_fp16(name, checkpoint_path, output_dir, verify=True):
     with torch.no_grad():
         scripted = torch.jit.script(model)
 
-    if verify:
-        _verify_bid_fp16(scripted, output_dir, name)
-
+    # 先落盘再做跨精度验证：验证会把模块 .float() 就地转成 FP32，
+    # 若在验证之后保存，得到的 _jit_fp16.pt 实际是 FP32。
     out_path = os.path.join(output_dir, f'{name}_jit_fp16.pt')
     scripted.save(out_path)
     size_mb = os.path.getsize(out_path) / (1024 * 1024)
     print(f'  -> {out_path} ({size_mb:.1f} MB)')
+
+    if verify:
+        _verify_bid_fp16(output_dir, name)
+
     return out_path
 
 
@@ -176,13 +183,16 @@ def export_play_fp16(name, checkpoint_path, output_dir, nhead=8, verify=True):
     with torch.no_grad():
         scripted = torch.jit.script(model)
 
-    if verify:
-        _verify_play_fp16(scripted, output_dir, name, arch['x_dim'])
-
+    # 先落盘再做跨精度验证：验证会把模块 .float() 就地转成 FP32，
+    # 若在验证之后保存，得到的 _jit_fp16.pt 实际是 FP32。
     out_path = os.path.join(output_dir, f'{name}_jit_fp16.pt')
     scripted.save(out_path)
     size_mb = os.path.getsize(out_path) / (1024 * 1024)
     print(f'  -> {out_path} ({size_mb:.1f} MB)')
+
+    if verify:
+        _verify_play_fp16(output_dir, name, arch['x_dim'])
+
     return out_path
 
 
@@ -213,14 +223,16 @@ def _verify_play(model, traced, x_dim):
         print(f'  batch={bs:3d} orig vs traced max diff: {diff:.2e}  [{status}]')
 
 
-def _verify_bid_fp16(scripted, output_dir, name):
+def _verify_bid_fp16(output_dir, name):
     fp32_path = os.path.join(output_dir, f'{name}_jit.pt')
+    fp16_path = os.path.join(output_dir, f'{name}_jit_fp16.pt')
     if not os.path.exists(fp32_path):
         print(f'  (skip cross-precision verify: FP32 model not found)')
         return
 
     fp32_model = torch.jit.load(fp32_path)
-    fp16_as_fp32 = scripted.float()
+    # 重新加载一份再转 FP32，避免改动已保存的 FP16 模型（.float() 是就地转换）
+    fp16_as_fp32 = torch.jit.load(fp16_path).float()
 
     for bs in [1, 3, 10]:
         z = torch.randn(bs, BID_Z_ROWS, Z_DIM)
@@ -233,14 +245,16 @@ def _verify_bid_fp16(scripted, output_dir, name):
         print(f'  batch={bs:3d} FP32-traced vs FP16-scripted(->FP32) diff: {diff:.2e}  [{status}]')
 
 
-def _verify_play_fp16(scripted, output_dir, name, x_dim):
+def _verify_play_fp16(output_dir, name, x_dim):
     fp32_path = os.path.join(output_dir, f'{name}_jit.pt')
+    fp16_path = os.path.join(output_dir, f'{name}_jit_fp16.pt')
     if not os.path.exists(fp32_path):
         print(f'  (skip cross-precision verify: FP32 model not found)')
         return
 
     fp32_model = torch.jit.load(fp32_path)
-    fp16_as_fp32 = scripted.float()
+    # 重新加载一份再转 FP32，避免改动已保存的 FP16 模型（.float() 是就地转换）
+    fp16_as_fp32 = torch.jit.load(fp16_path).float()
 
     for bs in [1, 3, 10, 50]:
         s1 = torch.randn(bs, PLAY_Z_ROWS, Z_DIM)
@@ -263,7 +277,7 @@ def main():
                         help=f'checkpoint 目录 (默认: {CHECKPOINT_DIR})')
     parser.add_argument('--output-dir', default=OUTPUT_DIR,
                         help=f'输出目录 (默认: {OUTPUT_DIR})')
-    parser.add_argument('--suffix', default=None,
+    parser.add_argument('--suffix', default=SUFFIX,
                         help='checkpoint frame 编号 (默认: 自动选择最新)')
     parser.add_argument('--positions', nargs='+',
                         default=['first', 'second', 'third',
@@ -299,7 +313,7 @@ def main():
     print()
 
     if args.fp16 or args.fp16_only:
-        print('⚠ FP16 使用 torch.jit.script 导出 (非 trace)。')
+        print('[注意] FP16 使用 torch.jit.script 导出 (非 trace)。')
         print('  LibTorch 1.5.0 CPU 不支持 FP16 内核, C++ 端会自动 .to(kFloat32) 转 FP32 推理。')
         print()
 

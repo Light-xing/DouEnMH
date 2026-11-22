@@ -1,32 +1,33 @@
 #!/bin/bash
 # =============================================================================
-# DouMH Botzone Build Reference (GCC 7.2.0 / Ubuntu)
+# build_botzone.sh — Linux/GCC 参考构建 (GCC 7.2.0 兼容性验证)
 # =============================================================================
-# This is what Botzone's "带很多库" compiler effectively runs.
-# Use this for local verification that the code is GCC-compatible.
+# 对应 Botzone 的 “带很多库” 编译器环境（Ubuntu 16.04 / g++ 7.2.0）：
+#   - 编译参数: -O2 -std=c++17
+#   - 平台自带 jsoncpp（#include "jsoncpp/json.h"）
+#   - LibTorch 1.5.0（默认装在 /usr/local/libtorch）
+#   - 资源限制: 每步 1 秒、进程内存 256 MB
 #
-# Botzone environment:
-#   - Ubuntu 16.04, g++ 7.2.0, -O2 -std=c++17
-#   - jsoncpp, nlohmann/json, Eigen pre-installed
-#   - LibTorch 1.5.0 at standard paths
-#   - 256 MB memory, 1 second per move
-#
-# Usage (local Ubuntu/WSL test):
+# 用法 (本地 Linux/WSL 验证):
 #   chmod +x build_botzone.sh
-#   ./build_botzone.sh              # Release build
-#   ./build_botzone.sh debug        # Debug build
-#   ./build_botzone.sh clean        # Clean
+#   ./build_botzone.sh                    # Release
+#   ./build_botzone.sh debug              # Debug
+#   ./build_botzone.sh clean              # 清理
+#
+# 环境变量:
+#   LIBTORCH_DIR   LibTorch 1.5.0 根目录（默认 /usr/local/libtorch）
+#   CXX            C++ 编译器（默认 g++）
 # =============================================================================
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SRC_DIR="$SCRIPT_DIR/../src"
-BUILD_DIR="$SCRIPT_DIR/../build_botzone"
+SRC_DIR="$(cd "$SCRIPT_DIR/../src" && pwd)"
+BUILD_DIR="$SCRIPT_DIR/../build/botzone"
 
-# ---- Botzone LibTorch paths (adjust for local testing) ----
-# On Botzone: /usr/local/libtorch/
-# Local WSL:  adjust to wherever LibTorch 1.5.0 GCC is installed
+# ---- LibTorch 路径 ----
+# Botzone: /usr/local/libtorch/；本地 WSL/Ubuntu 可用 LIBTORCH_DIR 覆盖
 LIBTORCH_DIR="${LIBTORCH_DIR:-/usr/local/libtorch}"
+CXX="${CXX:-g++}"
 
 # ---- Parse args ----
 MODE="${1:-release}"
@@ -50,6 +51,18 @@ case "$MODE" in
         ;;
 esac
 
+# ---- Check paths ----
+if [ ! -f "$LIBTORCH_DIR/include/torch/script.h" ]; then
+    echo "ERROR: LibTorch 1.5.0 not found under LIBTORCH_DIR=$LIBTORCH_DIR" >&2
+    echo "       Expected: $LIBTORCH_DIR/include/torch/script.h" >&2
+    echo "       Set LIBTORCH_DIR to the LibTorch root, or install it at /usr/local/libtorch." >&2
+    exit 1
+fi
+if [ ! -f "$SRC_DIR/main.cpp" ]; then
+    echo "ERROR: main.cpp not found: $SRC_DIR/main.cpp" >&2
+    exit 1
+fi
+
 mkdir -p "$BUILD_DIR"
 
 # ---- Compile ----
@@ -57,6 +70,7 @@ echo "============================================================"
 echo " DouMH Botzone Reference Build (GCC 7.2.0)"
 echo "============================================================"
 echo " Mode:      $MODE"
+echo " Compiler:  $CXX"
 echo " LibTorch:  $LIBTORCH_DIR"
 echo " Source:    $SRC_DIR"
 echo " Output:    $BUILD_DIR/bot"
@@ -65,7 +79,7 @@ echo ""
 
 set -x
 
-g++ $CXXFLAGS \
+"$CXX" $CXXFLAGS \
     -I"$SRC_DIR" \
     -I"$LIBTORCH_DIR/include" \
     -I"$LIBTORCH_DIR/include/torch/csrc/api/include" \
@@ -89,5 +103,5 @@ echo ""
 echo " Botzone submission:"
 echo "   1. Select compiler: '带很多库'"
 echo "   2. Upload .pt models to User Storage"
-echo "   3. Submit source files (see prepare_botzone.py)"
+echo "   3. Submit source files (see cpp/tools/prepare_botzone.py)"
 echo "============================================================"

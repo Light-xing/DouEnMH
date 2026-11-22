@@ -1,28 +1,41 @@
 """
-Local game runner — connects judge.py with bots/agents for end-to-end testing.
+Local game runner — drives bots and built-in agents with the bundled Botzone
+judge to play complete Doudizhu games for end-to-end testing.
 
 Architecture:
     runner.py
-      ├── judge.py (in-process) — game rules, dealing, scoring
-      ├── bot.exe  (subprocess, one per seat) — DouMH AI (KEEP_RUNNING protocol)
-      └── runner.py (in-process) — random/greedy/pass agents for any seat
+      ├── judge/judge_botzone_ver.py (in-process) — official Botzone judge
+      │     logic: dealing, bidding, trick validation, scoring (~0 ms overhead)
+      ├── bot.exe (subprocess, one per seat) — DouEnMH C++ inference build,
+      │     spoken to over stdin/stdout JSON (Botzone KEEP_RUNNING protocol)
+      └── in-process agents — random / greedy / pass baselines for any seat
 
-Usage:
-    # One bot + two random opponents (backward compat)
-    python runner.py --bot build/bot.exe --verbose
+The judge is bundled in tools/runner/judge/, so no external Botzone checkout
+is required. Relative bot paths passed to --p0/--p1/--p2/--bot/--vs are tried
+against the current working directory first, then against this script's
+directory (tools/runner/), so both `--bot cpp/build/bot.exe` (from the repo
+root) and `--bot ../../cpp/build/bot.exe` work. With no seat specified the
+runner uses cpp/build/bot.exe plus two random agents.
+
+Usage (from the repository root, or from tools/runner/ with runner.py):
+    python tools/runner/runner.py --help
+
+    # One bot + two random opponents (backward-compatible form)
+    python tools/runner/runner.py --bot ../../cpp/build/bot.exe --verbose
 
     # Three bots fighting each other
-    python runner.py --p0 build/bot.exe --p1 build/bot.exe --p2 build/bot.exe
+    python tools/runner/runner.py --p0 ../../cpp/build/bot.exe \\
+        --p1 ../../cpp/build/bot.exe --p2 ../../cpp/build/bot.exe
 
     # Bot vs greedy vs pass
-    python runner.py --p0 build/bot.exe --p1 greedy --p2 pass
+    python tools/runner/runner.py --p0 ../../cpp/build/bot.exe --p1 greedy --p2 pass
 
     # Batch test
-    python runner.py --bot build/bot.exe --games 100 --seed 42
+    python tools/runner/runner.py --bot ../../cpp/build/bot.exe --games 100 --seed 42
 
-    # Head-to-head VS verification (role-swapping)
-    python runner.py --bot build/bot_a.exe --vs build/bot_b.exe \\
-                     --vs-games 100 --vs-seed 42
+    # Head-to-head VS verification (same deal, roles swapped)
+    python tools/runner/runner.py --bot ../../cpp/build/bot_a.exe \\
+        --vs ../../cpp/build/bot_b.exe --vs-games 100 --vs-seed 42
 """
 
 import subprocess
@@ -36,12 +49,18 @@ import io
 from datetime import datetime
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-JUDGE_LOG_DIR = os.path.join(SCRIPT_DIR, "..", "..", "judge", "log")
+
+# Judge is bundled inside this directory (see THIRD_PARTY.md for provenance).
+JUDGE_DIR = os.path.join(SCRIPT_DIR, "judge")
+# All runner logs go to tools/runner/log/ (git-ignored; created on demand).
+JUDGE_LOG_DIR = os.path.join(SCRIPT_DIR, "log")
+
+# Default bot build, relative to tools/runner/ (i.e. cpp/build/bot.exe).
+DEFAULT_BOT_SPEC = os.path.join(os.pardir, os.pardir, "cpp", "build", "bot.exe")
 
 # Import judge module in-process (fast path — no subprocess startup cost)
-_JUDGE_DIR = os.path.join(SCRIPT_DIR, "..", "..", "judge")
-if _JUDGE_DIR not in sys.path:
-    sys.path.insert(0, _JUDGE_DIR)
+if JUDGE_DIR not in sys.path:
+    sys.path.insert(0, JUDGE_DIR)
 
 # Intercept exit() and sys.exit() before importing judge
 import builtins as _builtins
@@ -68,7 +87,8 @@ def card_value(card_id):
 
 
 RANK_NAMES = ['3','4','5','6','7','8','9','10','J','Q','K','A','2']
-SUIT_SYMBOLS = ['♤','♥','♦','♣']
+# Botzone card id % 4 order: 0=hearts, 1=diamonds, 2=spades, 3=clubs.
+SUIT_SYMBOLS = ['♥','♦','♤','♣']
 
 def card_to_str(card_id):
     """Convert a Botzone card ID to human-readable string like '3♠' or '小王'."""
@@ -340,6 +360,20 @@ class ForcedBidWrapper:
 # Player factory
 # =============================================================================
 
+def _resolve_bot_path(spec):
+    """Resolve a (possibly relative) bot executable path.
+
+    A relative path is first tried against the current working directory (so
+    `--bot cpp/build/bot.exe` works from the repository root), then against
+    this script's directory (tools/runner/). Absolute paths are returned as-is.
+    """
+    if os.path.isabs(spec):
+        return os.path.normpath(spec)
+    if os.path.exists(spec):
+        return os.path.normpath(spec)
+    return os.path.normpath(os.path.join(SCRIPT_DIR, spec))
+
+
 def _create_player(spec, seat, verbose=False):
     """Create a Player from a spec string.
 
@@ -351,10 +385,7 @@ def _create_player(spec, seat, verbose=False):
     elif spec == "pass":
         return PassPlayer(seat)
     else:
-        # Treat as bot path
-        if not os.path.isabs(spec):
-            spec = os.path.join(SCRIPT_DIR, spec)
-        return BotPlayer(spec, seat, verbose=verbose)
+        return BotPlayer(_resolve_bot_path(spec), seat, verbose=verbose)
 
 
 # =============================================================================
@@ -984,7 +1015,7 @@ def run_vs_batch(bot_a, bot_b, num_matches, verbose=False, master_seed=None,
             _print_vs_progress(match_idx + 1, num_matches, result_1, result_2)
 
     elapsed = time.time() - start_time
-    _print_vs_summary(stats, num_matches, elapsed)
+    _print_vs_summary(stats, num_matches, elapsed, unpaired=unpaired)
     _write_vs_log(stats, num_matches, elapsed, master_seed, all_results,
                   label_a, label_b)
 
@@ -1092,7 +1123,7 @@ def _print_vs_progress(match_num, total, r1, r2):
           f"G1 [{_game_str(r1)}]  G2 [{_game_str(r2)}]")
 
 
-def _print_vs_summary(stats, num_matches, elapsed):
+def _print_vs_summary(stats, num_matches, elapsed, unpaired=False):
     """Print final VS summary to stdout."""
     total_games = num_matches * 2
 
@@ -1125,10 +1156,12 @@ def _print_vs_summary(stats, num_matches, elapsed):
             print(f"    Overall:      {total_w}W / {total_g - total_w}L  "
                   f"({100*total_w/total_g:.1f}%)")
 
-    if 'paired' in stats:
+    if unpaired:
+        print("\n  --vs-unpaired: 未做同牌配对，配对统计与符号检验不适用。")
+    else:
         print("\n  注意: 配对模式下 Overall 天然接近 50%（每对牌两 bot 各当一次地主），"
               "\n        判断强弱请看下面的配对结论，而不是 Overall。")
-    _print_paired_summary(stats, num_matches)
+        _print_paired_summary(stats, num_matches)
 
 
 def _write_vs_log(stats, num_matches, elapsed, master_seed, all_results,
@@ -1222,9 +1255,27 @@ def _player_label(spec):
 # CLI
 # =============================================================================
 
+def _force_utf8_stdio():
+    """Force UTF-8 on stdout/stderr so redirected output never crashes.
+
+    On Windows, a pipe or file redirect makes Python use the ANSI code page
+    (e.g. cp936/cp1252) instead of the console's UTF-8 writer.  The Chinese
+    summary lines contain characters that code page cannot encode, which would
+    raise UnicodeEncodeError halfway through a run.  Reconfiguring is a no-op
+    on Python builds that already write UTF-8 to the console.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def main():
+    _force_utf8_stdio()
     parser = argparse.ArgumentParser(
-        description="DouMH Local Game Runner — test bots against opponents")
+        description="DouEnMH Local Game Runner - play games against bots/agents "
+                    "with the bundled Botzone judge")
 
     # Per-seat player specs
     parser.add_argument("--p0", default=None, metavar="SPEC",
@@ -1235,37 +1286,54 @@ def main():
                         help="Player 2: bot.exe path | random | greedy | pass")
 
     # Backward-compat: single bot + opponent type
-    parser.add_argument("--bot", default=None,
-                        help="Path to bot.exe (shorthand for one bot seat)")
+    parser.add_argument("--bot", default=None, metavar="PATH",
+                        help="Path to bot.exe (shorthand for one bot seat); "
+                             "relative paths are tried against the current "
+                             "directory, then tools/runner/. Default when no "
+                             "seat is given: cpp/build/bot.exe")
     parser.add_argument("--opponent", choices=["random", "greedy", "pass"],
                         default="random",
-                        help="Agent type for non-bot seats (default: random)")
+                        help="Agent type for non-bot seats with --bot "
+                             "(default: random)")
 
     parser.add_argument("--games", type=int, default=1,
-                        help="Number of games to run (default: 1)")
+                        help="Number of games to run (default: 1). "
+                             "1 = single-game mode, >1 = batch mode")
     parser.add_argument("--seed", type=int, default=None,
-                        help="Random seed for first game")
+                        help="Random seed (single game: this game's seed; "
+                             "batch: seed of the per-game seed sequence)")
     parser.add_argument("--verbose", "-v", action="store_true",
-                        help="Verbose output (show bot I/O)")
+                        help="Verbose output (show bot I/O and judge calls)")
     parser.add_argument("--timeout", type=float, default=30.0,
-                        help="Timeout per judge call in seconds (default: 30)")
+                        help="Per-call timeout in seconds (default: 30; "
+                             "parsed for compatibility, not enforced)")
     parser.add_argument("--no-log", action="store_true",
-                        help="Disable per-turn game logging (logging is on by default for single games)")
+                        help="Disable per-turn game logging (per-turn logs are "
+                             "on by default in single-game and VS modes; "
+                             "batch mode is always off)")
 
     # VS batch verification mode
     parser.add_argument("--vs", dest="vs_bot", default=None, metavar="PATH",
-                        help="Path to second bot for head-to-head verification")
+                        help="Path to the second bot (bot B); entering VS "
+                             "head-to-head verification mode")
     parser.add_argument("--vs-games", type=int, default=100,
-                        help="Number of matches in VS mode (each match = 2 games)")
+                        help="Number of matches in VS mode (default: 100; "
+                             "each match = 2 games on the same deal)")
     parser.add_argument("--vs-seed", type=int, default=None,
-                        help="Master seed for deterministic VS game sequence")
+                        help="Master seed for the deterministic VS game sequence")
     parser.add_argument("--vs-unpaired", action="store_true",
-                        help="旧行为: G1/G2 用不同种子(不推荐, 会把牌组差异误读成引擎差异)")
+                        help="Legacy: G1/G2 use different seeds (not "
+                             "recommended; deal variance would be read as "
+                             "engine strength difference)")
 
     args = parser.parse_args()
 
     # ── VS batch verification mode ──
     if args.vs_bot is not None:
+        if args.vs_games < 1:
+            print("ERROR: --vs-games must be >= 1")
+            sys.exit(1)
+
         # Resolve bot A path
         if args.bot is not None:
             bot_a = args.bot
@@ -1278,11 +1346,13 @@ def main():
         # Resolve bot B path
         bot_b = args.vs_bot
 
-        # Make paths absolute
+        # Make paths absolute (relative to tools/runner/)
         if not os.path.isabs(bot_a):
             bot_a = os.path.join(SCRIPT_DIR, bot_a)
         if not os.path.isabs(bot_b):
             bot_b = os.path.join(SCRIPT_DIR, bot_b)
+        bot_a = os.path.normpath(bot_a)
+        bot_b = os.path.normpath(bot_b)
 
         # Validate both bots exist
         for path, name in [(bot_a, "Bot A"), (bot_b, "Bot B")]:
@@ -1297,6 +1367,10 @@ def main():
         return
 
     # ── Normal / backward-compat mode ──
+    if args.games < 1:
+        print("ERROR: --games must be >= 1")
+        sys.exit(1)
+
     # Resolve player specs
     if args.p0 is not None or args.p1 is not None or args.p2 is not None:
         # Explicit per-seat config
@@ -1309,14 +1383,27 @@ def main():
         # Backward-compat: --bot <path> --opponent <type>
         specs = [args.bot, args.opponent, args.opponent]
     else:
-        # Default: bot at build/bot.exe + two random
-        specs = ["build/bot.exe", "random", "random"]
+        # Default: the repo's own bot build (../../cpp/build/bot.exe,
+        # resolved against tools/runner/) + two random agents.
+        specs = [DEFAULT_BOT_SPEC, "random", "random"]
+
+    # Fail fast with a clear message instead of a Popen traceback.
+    for seat, spec in enumerate(specs):
+        if spec.strip() in ("random", "greedy", "pass"):
+            continue
+        exe = _resolve_bot_path(spec)
+        if not os.path.isfile(exe):
+            print(f"ERROR: P{seat} bot executable not found: "
+                  f"{os.path.normpath(exe)}")
+            print("       Build the bot first (see docs/cpp.md) or use "
+                  "random/greedy/pass for that seat.")
+            sys.exit(1)
 
     # Print player config
     labels = [_player_label(s) for s in specs]
     print(f"Players: P0={labels[0]}  P1={labels[1]}  P2={labels[2]}")
-    print(f"Judge:   {_JUDGE_DIR}/judge_botzone_ver.py (in-process)")
-    print(f"Timeout: {args.timeout}s")
+    print(f"Judge:   {JUDGE_DIR}/judge_botzone_ver.py (in-process)")
+    print(f"Timeout: {args.timeout}s (not enforced)")
     print()
 
     if args.games == 1:

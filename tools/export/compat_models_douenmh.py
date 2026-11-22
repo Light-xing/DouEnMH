@@ -1,14 +1,20 @@
 """
-DouEnMH PyTorch 1.5.0 兼容模型定义。
+DouEnMH PyTorch 1.5.0 兼容模型定义（V1 出牌模型 + 叫分模型）。
 
 与 douzero/dmc/models.py 的差异:
 1. nn.Mish → 自定义 mish(x) = x * tanh(softplus(x))
 2. batch_first=True → 手动 transpose (S,B,E) ↔ (B,S,E)
-3. 无其他结构变化 — state_dict key 名完全一致, 可直接加载 checkpoint
+3. forward 只保留推理分支并直接返回 Q 张量；训练端 forward 还有
+   return_value / flags 参数与 dict 返回值，导出用不到，脚本化也会更复杂
+4. 无其他结构变化 — state_dict key 名完全一致, 可直接 load_state_dict
+
+不包含 GeneralModelTransformerV2（Cross-Attention 架构），其 state_dict 使用
+state_proj / action_proj / history_proj / cross_attn / history_encoder 等键，
+与这里的 state_embed / action_embed 不同，不能加载进本文件的模型。
 
 用法:
     from compat_models_douenmh import GeneralModelBid, GeneralModelTransformer
-    sd = torch.load('landlord_4093600.ckpt', map_location='cpu')
+    sd = torch.load('landlord_620000000.ckpt', map_location='cpu')
     arch = detect_play_architecture(sd)
     model = GeneralModelTransformer(**arch)
     model.load_state_dict(sd)
