@@ -1,0 +1,16 @@
+# ── 必需 ────────────────────────────────────────────────────────────────
+# 训练 / 推理 / 环境核心都依赖
+torch>=1.6.0
+numpy
+
+# ── 可选（缺失时自动降级，不影响训练与推理）──────────────────────────────
+# numba       douzero/env/numba_utils.py 的 JIT 加速；缺失时走纯 Python（可用 Numba_DISABLE=1 强制关闭）
+# pandas      auto_test.py 的 CSV 结果输出
+# matplotlib  auto_test.py 的评估曲线绘制
+# rlcard      douzero/evaluation/rlcard_agent.py 的对手实现（仅评估用）
+
+# ── 说明 ────────────────────────────────────────────────────────────────
+# 1. 神谕 DP 的 C 扩展 douzero/env/oracle_core.dll 不走 pip：用 douzero/env/_compile.bat
+#    编译同目录的 oracle_core.c 得到；缺失时 oracle.py 自动回退纯 Python 实现。
+# 2. C5 特征开关通过环境变量 DOUENMH_ENABLE_C5 控制（默认开启，X 维度 56；关闭为 52）。
+# 3. GitPython / gitdb2 曾列在本文件中，但全仓代码从未 import，已移除。
